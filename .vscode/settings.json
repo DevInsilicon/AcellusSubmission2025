@@ -1,0 +1,10 @@
+{
+    "python.autoComplete.extraPaths": [
+        "c:\\Users\\insilicon\\.vscode\\extensions\\walklinewang.code-completion-for-micropython-0.1.9\\code_completion\\default"
+    ],
+    "python.analysis.extraPaths": [
+        "c:\\Users\\insilicon\\.vscode\\extensions\\walklinewang.code-completion-for-micropython-0.1.9\\code_completion\\default"
+    ],
+    "python.analysis.stubPath": "c:\\Users\\insilicon\\.vscode\\extensions\\walklinewang.code-completion-for-micropython-0.1.9\\code_completion\\default",
+    "micropython.enableCodeCompletion": true
+}
