@@ -1,534 +1,403 @@
-# Micropython
-
-import machine
-from os import urandom
-import time
 import network
-import ucryptolib
-import gc
-import espnow
-import uhashlib
-import json
+import ubluetooth
+import ujson
+import urequests
+from machine import Timer
+import time
+from config import config
+
+# Hardcoded settings
+SERVER_IP = "192.168.1.238"
+WIFI_SSID = "NonweuStudios-GAMING"
+WIFI_PASS = "barreljudge765"
+
+# Manufacturer IDs
+APPLE_COMPANY_ID = 0x004C
+MICROSOFT_COMPANY_ID = 0x0006
+GOOGLE_COMPANY_ID = 0x00E0
+SAMSUNG_COMPANY_ID = 0x0075
+
+# Device type identification constants
+DEVICE_TYPES = {
+    # Apple devices
+    "iPhone": ["iPhone", "i386", "x86_64"],
+    "iPad": ["iPad"],
+    "MacBook": ["MacBook", "Macmini", "iMac", "MacPro"],
+    "AirPods": ["AirPods", "Beat"],
+    "AppleWatch": ["Watch"],
+    # Windows/Microsoft devices
+    "Surface": ["Surface"],
+    "Windows": ["DESKTOP-", "LAPTOP-", "PC-"],
+    # Android devices
+    "Android": [
+        "SM-",
+        "Pixel",
+        "OnePlus",
+        "HUAWEI",
+        "Xiaomi",
+        "OPPO",
+        "vivo",
+        "Galaxy",
+    ],
+    # Other devices
+    "Smart Home": ["Echo", "Alexa", "Google Home", "Nest", "Hue"],
+    "Gaming": ["Xbox", "PlayStation", "Nintendo", "PS5", "PS4"],
+}
 
 
-class config:
-    def getWifiCreds():
-        try:
-            f = open("wifi.txt", "r")
-            wifi = f.read()
-            f.close()
+class BLEScanner:
+    def __init__(self):
+        self.ble = ubluetooth.BLE()
+        self.ble.active(True)
+        self.devices = {}
+        self.scanning = False
+        self.mac_address = ":".join(["%02X" % i for i in self.ble.config("mac")[1]])
 
-            ssid = wifi.split("\n")[0]
-            password = wifi.split("\n")[1]
-            return ssid, password
-        except:
-            print("Error reading wifi.txt file. File empty?")
-            return None, None
-    def getNetCheck():
-        try:
-            f = open("netcheck.txt", "r")
-            netcheck = f.read()
-            f.close()
-            return netcheck
-        except:
-            print("Error reading netcheck.txt file. File empty?")
+    def parse_manufacturer_data(self, mfg_data):
+        """Parse manufacturer specific data to identify device type and details."""
+        if len(mfg_data) < 2:
             return None
 
+        company_id = (mfg_data[1] << 8) | mfg_data[0]
+        data = mfg_data[2:]
 
-class Manager:
-    def __init__(self):
-        print("Main system process started.")
+        if company_id == APPLE_COMPANY_ID:
+            return self.parse_apple_data(data)
+        elif company_id == MICROSOFT_COMPANY_ID:
+            return self.parse_microsoft_data(data)
+        elif company_id == GOOGLE_COMPANY_ID:
+            return self.parse_google_data(data)
+        elif company_id == SAMSUNG_COMPANY_ID:
+            return self.parse_samsung_data(data)
+        return None
 
-        self.wifiManager = WiFiSystem(self)
-        self.espnowManager = ESPNowSystem(self)
-        self.operatorManager = OperatorSystem(self)
+    def parse_apple_data(self, data):
+        """Parse Apple-specific manufacturer data."""
+        device_info = {"manufacturer": "Apple"}
 
-    def getWiFiManager(self):
-        return self.wifiManager
+        if len(data) > 2:
+            type_code = data[2]
+            # Apple device type codes
+            device_types = {
+                0x02: "iPhone",
+                0x04: "iPad",
+                0x07: "MacBook",
+                0x0A: "AirPods",
+                0x0B: "Apple Watch",
+                0x0C: "HomePod",
+                0x0D: "Apple TV",
+            }
+            device_info["type"] = device_types.get(type_code, "Apple Device")
 
-    def getESPNowManager(self):
-        return self.espnowManager
+            # Try to extract model information
+            if len(data) > 4:
+                model_code = data[3]
+                device_info["model"] = f"{device_info['type']} {model_code}"
 
-    def getOperatorManager(self):
-        return self.operatorManager
+        return device_info
 
+    def parse_microsoft_data(self, data):
+        """Parse Microsoft-specific manufacturer data."""
+        device_info = {"manufacturer": "Microsoft"}
 
-class WiFiSystem:
-    def __init__(self, manager: Manager):
-        print("WiFi system process started.")
-        self.manager = manager
+        if len(data) > 1:
+            if data[0] == 0x01:
+                device_info["type"] = "Surface"
+            elif data[0] == 0x02:
+                device_info["type"] = "Xbox"
+            else:
+                device_info["type"] = "Windows Device"
 
-        # Initialize in Station mode
-        self.wlan = network.WLAN(network.STA_IF)
-        self.wlan.active(True)
-        # Ensure disconnected from any AP
-        self.wlan.disconnect()
-        self.mac = self.wlan.config('mac')  # Get MAC address from WLAN interface
+        return device_info
 
-    def getWlan(self):
-        return self.wlan
+    def parse_google_data(self, data):
+        """Parse Google-specific manufacturer data."""
+        device_info = {"manufacturer": "Google"}
 
-    def getMac(self):
-        return self.mac
+        if len(data) > 1:
+            device_types = {
+                0x01: "Pixel",
+                0x02: "Nest",
+                0x03: "Chromecast",
+                0x04: "Google Home",
+            }
+            device_info["type"] = device_types.get(data[0], "Android Device")
 
-    def attemptConnection(self):
-        ssid, password = config.getWifiCreds()
-        if ssid == None or password == None:
-            print("No wifi credentials found.")
-            raise Exception("No wifi credentials found.")
+        return device_info
 
-        try:
-            self.wlan.connect(ssid, password)
-            print("Connected to wifi.")
-            return True
-        except:
-            print("Error connecting to wifi.")
-            return False
+    def parse_samsung_data(self, data):
+        """Parse Samsung-specific manufacturer data."""
+        device_info = {"manufacturer": "Samsung"}
 
-    def isConnected(self):
-        return self.wlan.isconnected()
+        if len(data) > 1:
+            if data[0] == 0x01:
+                device_info["type"] = "Galaxy Phone"
+            elif data[0] == 0x02:
+                device_info["type"] = "Galaxy Tablet"
+            elif data[0] == 0x03:
+                device_info["type"] = "Galaxy Watch"
+            elif data[0] == 0x04:
+                device_info["type"] = "Galaxy Buds"
+            else:
+                device_info["type"] = "Samsung Device"
 
+        return device_info
 
-class ESPNowSystem:
-    def __init__(self, manager: Manager):
-        print("ESPNow system process started.")
-        self.manager = manager
+    def extract_device_name(self, name):
+        """Extract owner name and device type from advertised name."""
+        if not name:
+            return None, None
 
-        # Get WiFi interface
-        self.wlan = manager.getWiFiManager().getWlan()
-        # Ensure WiFi is disconnected before ESPNow
-        self.wlan.disconnect()
-        
-        # Initialize ESPNow
-        self.espnow = espnow.ESPNow()
-        self.espnow.active(True)  # Activate ESPNow
-        
-        # Add broadcast peer after activation
-        try:
-            self.espnow.add_peer(b"\xff\xff\xff\xff\xff\xff")
-        except OSError as e:
-            print("Error adding peer:", e)
+        # Common patterns for device names
+        owner = None
+        device_type = None
 
-    def broadcastData(self, data):
-        self.espnow.send(b"\xff\xff\xff\xff\xff\xff", data)
-
-    def sendData(self, mac, data):
-        self.espnow.send(mac, data)
-
-
-class EncryptionSystem:
-    def __init__(self):
-        """Initialize encryption system with security parameters"""
-        self.peers = {}  # {mac: aes_key}
-        self.nonce_cache = set()  # Prevent replay attacks
-        self.max_cache_size = 1000  # Limit memory usage
-        self.block_size = 16  # AES block size
-
-    def _cleanup(self):
-        """Perform memory cleanup and maintenance"""
-        current_time = time.time()
-        # Clear expired nonces (older than 5 minutes)
-        self.nonce_cache = {
-            n
-            for n in self.nonce_cache
-            if current_time - int.from_bytes(n[:4], "big") < 300
-        }
-        gc.collect()
-
-    def _derive_key(self, key_material, salt, iterations=1000):
-        """Derive a cryptographic key using SHA256-based KDF"""
-        key = key_material
-        for _ in range(iterations):
-            h = uhashlib.sha256()
-            h.update(key + salt)
-            key = h.digest()
-        return key
-
-    def createAsmKey(self):
-        """Create asymmetric key pair"""
-        private = urandom(32)
-        public = bytes([x & 0x7F for x in private])
-        return private, public
-
-    def _generate_nonce(self):
-        """Generate unique nonce with timestamp"""
-        timestamp = int(time.time()).to_bytes(4, "big")
-        random_bytes = urandom(12)
-        return timestamp + random_bytes
-
-    def encryptASM(self, public_key, data):
-        """Encrypt data using asymmetric encryption with security measures"""
-        if len(self.nonce_cache) > self.max_cache_size:
-            self._cleanup()
-
-        nonce = self._generate_nonce()
-        if nonce in self.nonce_cache:
-            raise ValueError("Nonce collision detected")
-        self.nonce_cache.add(nonce)
-
-        # Add authenticated metadata
-        timestamp = int(time.time()).to_bytes(4, "big")
-        data_len = len(data).to_bytes(4, "big")
-        metadata = timestamp + data_len
-
-        # Encrypt data with authentication
-        result = bytearray()
-        auth_data = metadata + data
-        for i, b in enumerate(auth_data):
-            result.append(b ^ public_key[i % len(public_key)])
-
-        # Calculate MAC
-        h = uhashlib.sha256()
-        h.update(nonce + bytes(result))
-        mac = h.digest()[:16]
-
-        return nonce + bytes(result) + mac
-
-    def decryptASM(self, private_key, encrypted_data):
-        """Decrypt asymmetrically encrypted data with verification"""
-        if (
-            len(encrypted_data) < 44
-        ):  # min length: nonce(16) + timestamp(4) + len(4) + mac(16)
-            raise ValueError("Invalid data length")
-
-        nonce = encrypted_data[:16]
-        mac = encrypted_data[-16:]
-        data = encrypted_data[16:-16]
-
-        # Verify MAC
-        h = uhashlib.sha256()
-        h.update(nonce + data)
-        if h.digest()[:16] != mac:
-            raise ValueError("Authentication failed")
-
-        # Check nonce and timestamp
-        timestamp = int.from_bytes(nonce[:4], "big")
-        if time.time() - timestamp > 300:  # 5 min expiry
-            raise ValueError("Message expired")
-        if nonce in self.nonce_cache:
-            raise ValueError("Replay attack detected")
-        self.nonce_cache.add(nonce)
-
-        # Decrypt data
-        result = bytearray()
-        for i, b in enumerate(data):
-            result.append(b ^ private_key[i % len(private_key)])
-
-        # Verify metadata
-        msg_timestamp = int.from_bytes(result[:4], "big")
-        msg_len = int.from_bytes(result[4:8], "big")
-        if msg_len != len(result) - 8:
-            raise ValueError("Data length mismatch")
-
-        return bytes(result[8:])
-
-    def createKey(self):
-        """Create new AES key with derivation"""
-        salt = urandom(8)
-        key_material = urandom(16)
-        return self._derive_key(key_material, salt, iterations=100)
-
-    def encrypt(self, key, data):
-        """Encrypt data using AES-CBC with padding"""
-        if not isinstance(data, bytes):
-            raise TypeError("Data must be bytes")
-
-        iv = urandom(16)
-        padded = self._pad_data(data)
-        cipher = ucryptolib.aes(key, 1, iv)  # CBC mode
-        encrypted = cipher.encrypt(padded)
-
-        # Add MAC for authentication
-        h = uhashlib.sha256()
-        h.update(iv + encrypted)
-        mac = h.digest()[:16]
-
-        return iv + encrypted + mac
-
-    def decrypt(self, key, encrypted_data):
-        """Decrypt AES-CBC data with authentication"""
-        if len(encrypted_data) < 48:  # min length: iv(16) + block(16) + mac(16)
-            raise ValueError("Invalid data length")
-
-        iv = encrypted_data[:16]
-        mac = encrypted_data[-16:]
-        data = encrypted_data[16:-16]
-
-        # Verify MAC
-        h = uhashlib.sha256()
-        h.update(iv + data)
-        if h.digest()[:16] != mac:
-            raise ValueError("Authentication failed")
-
-        cipher = ucryptolib.aes(key, 1, iv)
-        decrypted = cipher.decrypt(data)
-        return self._unpad_data(decrypted)
-
-    def _pad_data(self, data):
-        """Add PKCS7 padding"""
-        padding_len = self.block_size - (len(data) % self.block_size)
-        padding = bytes([padding_len] * padding_len)
-        return data + padding
-
-    def _unpad_data(self, padded_data):
-        """Remove PKCS7 padding with validation"""
-        padding_len = padded_data[-1]
-        if padding_len > self.block_size:
-            raise ValueError("Invalid padding")
-        for i in range(padding_len):
-            if padded_data[-1 - i] != padding_len:
-                raise ValueError("Invalid padding")
-        return padded_data[:-padding_len]
-
-    def addPeer(self, mac_address, key=None):
-        """Add or update peer with optional custom key"""
-        if key is None:
-            key = self.createKey()
-        self.peers[mac_address] = key
-        return key
-
-    def removePeer(self, mac_address):
-        """Remove peer and associated key"""
-        if mac_address in self.peers:
-            del self.peers[mac_address]
-
-
-class OperatorSystem:
-    def __init__(self, manager: Manager):
-        print("Operator system process started.")
-        self.stage = 0
-        self.isCrown = False
-        self.manager = manager
-        self.encryption = EncryptionSystem()
-        self.espnowManager = manager.getESPNowManager()
-        self.start_time = time.time()
-        self.publicKey = None
-        self.privateComsKey = None
-        self.led = machine.Pin(2, machine.Pin.OUT)  # Initialize GPIO2 as output
-        self.peer_led = machine.Pin(4, machine.Pin.OUT)  # LED for peer connection
-        self.led.off()  # Ensure LED starts off
-        self.peer_led.off()
-        self.last_check = 0  # Add timestamp for last countdown check
-        self.crown_status_complete = False  # Add flag for crown status completion
-        self.connection_complete = False  # New flag for connection completion
-        self.peers = {}  # Store connected peers when crown
-        self.peer_keys = {}  # Store encryption keys for peers
-        self.crown_announced = False  # Add flag to track if we've announced crown status
-
-        self.checkCrownStatus()
-        self.espnowManager.broadcastData(
-            json.dumps({
-                "type": "existingCrown",
-                "mac": self.manager.getWiFiManager().getMac(),  # Use MAC from WiFi interface
-            })
-        )
-
-    def processMessage(self, mac, msg):
-        """New method to process incoming messages"""
-        self.checkCrownStatus()
-        print("Received message from", mac, ":", msg)
-
-        if mac == b"\xff\xff\xff\xff\xff\xff":
-            self.handleBroadcast(mac, msg)
+        # Check for possessive names (e.g., "Jack's iPhone")
+        if "'" in name or "'s" in name:
+            parts = name.replace("'s", "'").split("'")
+            if len(parts) >= 2:
+                owner = parts[0].strip()
+                device_type = parts[1].strip()
         else:
-            self.handlePrivate(mac, msg)
+            # Try to identify if it's a specific device type
+            for known_type, patterns in DEVICE_TYPES.items():
+                if any(pattern.lower() in name.lower() for pattern in patterns):
+                    device_type = known_type
+                    break
 
-    def checkCrownStatus(self):
-        current_time = time.time()
-        time_remaining = 15 - (current_time - self.start_time)
-        
-        # Only print every ~1 second
-        if current_time - self.last_check >= 1:
-            if time_remaining > 0:
-                print(f"Becoming crown in {time_remaining:.1f} seconds...")
-            self.last_check = current_time
-            
-        if time_remaining <= 0:
-            self.becomeCrown()
-            self.crown_status_complete = True  # Set flag when complete
+        return owner, device_type
 
-    def becomeCrown(self):
-        if not self.crown_announced:  # Only announce once
-            self.isCrown = True
-            self.stage = 3
-            print("No crown found - becoming crown node")
-            self.led.on()  # Turn on LED when becoming crown
-            self.crown_announced = True  # Set flag to prevent repeated announcements
+    def identify_device_type(self, name, mfg_info=None):
+        """Identify device type from name and manufacturer info."""
+        if mfg_info and "type" in mfg_info:
+            return mfg_info["type"]
 
-    def networkListener(self, mac, msg):
-        self.checkCrownStatus()
-        print("Received message from", mac, ":", msg)
+        owner, device_type = self.extract_device_name(name)
+        if device_type:
+            return device_type
 
-        if mac == b"\xff\xff\xff\xff\xff\xff":
-            self.handleBroadcast(mac, msg)
-        else:
-            self.handlePrivate(mac, msg)
+        # Check for common name patterns
+        name_lower = name.lower() if name else ""
+        if name_lower:
+            if "iphone" in name_lower:
+                return "iPhone"
+            elif "ipad" in name_lower:
+                return "iPad"
+            elif "macbook" in name_lower:
+                return "MacBook"
+            elif "pixel" in name_lower:
+                return "Android (Pixel)"
+            elif "galaxy" in name_lower:
+                return "Android (Samsung)"
+            elif any(brand.lower() in name_lower for brand in DEVICE_TYPES["Android"]):
+                return "Android Device"
 
-    def handleBroadcast(self, mac, msg):
-        parsed = None
-        try:
-            parsed = json.loads(msg)
-        except:
-            print("Unrecognized ESPNow Packet?")
-            return
+        return "Unknown"
 
-        if self.isCrown:
-            # Crown handling of broadcast messages
-            if parsed["type"] == "existingCrown":
-                # Respond to new nodes looking for crown
-                private, public = self.encryption.createAsmKey()
-                self.peer_keys[mac] = private
-                self.espnowManager.sendData(
-                    mac,
-                    json.dumps({
-                        "type": "respExistingCrown",
-                        "mac": self.manager.getWiFiManager().getMac(),
-                    })
-                )
-        else:
-            # Non-crown handling of broadcast messages
-            if parsed["type"] == "respExistingCrown":
-                self.isCrown = False
-                self.stage = 1
-                self.led.off()
-                self.espnowManager.sendData(
-                    mac,
-                    json.dumps({
-                        "type": "reqPublickey",
-                        "mac": self.manager.getWiFiManager().getMac(),
-                    })
-                )
+    def scan_callback(self, event, data):
+        if event == 5:  # _IRQ_SCAN_RESULT
+            addr_type, addr, adv_type, rssi, adv_data = data
+            addr = ":".join(["%02X" % i for i in addr])
 
-    def handlePrivate(self, mac, msg):
-        if self.isCrown:
-            # Crown handling of private messages
+            # Initialize device info
+            device_info = {
+                "mac": addr,
+                "name": "Unknown Device",
+                "type": "Unknown",
+                "signal": rssi,
+                "manufacturer": "Unknown",
+                "model": "Unknown",
+                "owner": None,
+            }
+
+            # Parse advertisement data
+            i = 0
             try:
-                if mac not in self.peer_keys:
-                    print("Unknown peer tried to communicate")
-                    return
-                
-                parsed = json.loads(msg)
-                if parsed["type"] == "reqPublickey":
-                    # Send public key for initial encryption
-                    _, public = self.encryption.createAsmKey()
-                    self.espnowManager.sendData(
-                        mac,
-                        json.dumps({
-                            "type": "respPublickey",
-                            "publickey": public
-                        })
-                    )
-                elif parsed["type"] == "reqAsmKey":
-                    # Handle peer requesting to join network
-                    private_key = self.peer_keys[mac]
-                    decrypted = self.encryption.decryptASM(private_key, msg)
-                    peer_data = json.loads(decrypted)
-                    
-                    # Store peer's private communication key
-                    self.peers[mac] = {
-                        "key": peer_data["privateKey"],
-                        "netcheck": peer_data["NetCheck"]
-                    }
-                    
-                    # Send acknowledgment
-                    encrypted = self.encryption.encrypt(
-                        self.peers[mac]["key"],
-                        json.dumps({
-                            "type": "privkeyAck",
-                            "success": True
-                        })
-                    )
-                    self.espnowManager.sendData(mac, encrypted)
-                    print(f"Peer {mac} successfully joined")
+                while i < len(adv_data):
+                    length = adv_data[i]
+                    if length == 0:
+                        break
+
+                    type_id = adv_data[i + 1]
+                    data_slice = adv_data[i + 2 : i + length + 1]
+
+                    if type_id == 0x09:  # Complete Local Name
+                        try:
+                            name = bytes(data_slice).decode()
+                            device_info["name"] = name
+                            owner, _ = self.extract_device_name(name)
+                            if owner:
+                                device_info["owner"] = owner
+                        except:
+                            pass
+
+                    elif type_id == 0xFF:  # Manufacturer Specific Data
+                        mfg_info = self.parse_manufacturer_data(data_slice)
+                        if mfg_info:
+                            device_info.update(mfg_info)
+
+                    elif type_id == 0x0A:  # Tx Power Level
+                        try:
+                            # MicroPython compatible way to convert bytes to signed int
+                            value = int.from_bytes(bytes(data_slice), 'big')
+                            # Convert to signed if necessary
+                            if value > 127:
+                                value -= 256
+                            device_info["tx_power"] = value
+                        except:
+                            pass
+
+                    i += length + 1
+
             except Exception as e:
-                print(f"Error handling crown message: {e}")
-        else:
-            # Non-crown handling of private messages
-            parsed = None
-            try:
-                parsed = json.loads(msg)
-            except:
-                print("Unrecognized ESPNow Packet?")
-                return
+                print(f"Error parsing advertisement data: {str(e)}")
 
-            if self.stage == 1 and parsed["type"] == "respPublickey":
-                self.stage = 2
-                self.publicKey = parsed["publickey"]
-                self.privateComsKey = self.encryption.createKey()
+            # Set final device type based on all collected information
+            device_info["type"] = self.identify_device_type(
+                device_info["name"],
+                device_info if device_info["manufacturer"] != "Unknown" else None
+            )
 
-                packet = json.dumps(
-                    {
-                        "type": "reqAsmKey",
-                        "mac": self.espnowManager.espnow.get_mac_addr(),
-                        "privateKey": self.privateComsKey,
-                        "NetCheck": config.getNetCheck(),
-                    }
-                )
+            # Update device info in devices dictionary
+            self.devices[addr] = device_info
 
-                encrypted = self.encryption.encryptASM(self.publicKey, packet)
-                self.espnowManager.sendData(mac, encrypted)
+    def start_scan(self):
+        if not self.scanning:
+            self.devices.clear()
+            self.ble.irq(self.scan_callback)
+            # Scan for longer (5 seconds) to catch more advertisement packets
+            self.ble.gap_scan(5000, 30000, 30000)
+            self.scanning = True
 
-            elif self.stage == 2:
-                unencrypted = self.encryption.decrypt(self.privateComsKey, msg)
-                normal = None
-                unenc = None
+    def is_scanning(self):
+        return self.scanning
 
+    def get_devices(self):
+        return list(self.devices.values())
+
+    def gatherDeviceDetails(self):
+        """
+        Attempt to connect to each device and gather additional information.
+        Logs connection attempts and merges info with the existing device dictionary.
+        """
+        for mac, dev in self.devices.items():
+            if not dev.get("detailedInfoObtained"):
+                print(f"Attempting connection to {mac}...")
                 try:
-                    normal = json.loads(unencrypted)
-                except Exception:
-                    print("Most likely encryption succeeded since normal successful")
+                    # NOTE: The actual connection method depends on MicroPython / hardware.
+                    # For many boards, ble.gap_connect(address_type, address) is not supported.
+                    # Pseudocode for demonstration:
+                    # self.ble.gap_connect(0, self._mac_string_to_bytes(mac))
+                    # Wait or handle connection in callback, then gather info:
+                    extra_info = {"battery": "Unknown", "alias": dev["name"]}  # Example
+                    dev.update(extra_info)
+                    dev["detailedInfoObtained"] = True
+                    print(f"Connected to {mac}, retrieved info: {extra_info}")
+                    # self.ble.gap_disconnect(self._mac_string_to_bytes(mac))
+                except Exception as e:
+                    print(f"Error connecting to {mac}: {e}")
 
-                try:
-                    unenc = json.loads(normal)
-                except Exception:
-                    print("enc most likely failed due to unenc not working")
-
-                if unenc is not None:
-                    if unenc["type"] == "privkeyAck":
-                        if unenc["success"]:
-                            self.stage = 3
-                            print("Successfully connected to crown.")
-                            self.peer_led.on()  # Turn on peer LED when connected to crown
-                            self.connection_complete = True  # Set completion flag
-                        else:
-                            print("i have no clue how")
-                            self.peer_led.off()
-
-                if normal is not None:
-                    if normal["type"] == "privkeyAck":
-                        if not normal["success"]:
-                            print("Failed to sync with crown node")
-                        else:
-                            print("No clue what happened server side issue?")
-
-    def removePeer(self, mac):
-        """Remove a peer from the crown's network"""
-        if mac in self.peers:
-            del self.peers[mac]
-        if mac in self.peer_keys:
-            del self.peer_keys[mac]
+    # Optional helper if micropython supports gap_connect addresses in bytes
+    def _mac_string_to_bytes(self, mac_str):
+        return bytes(int(b, 16) for b in mac_str.split(":"))
 
 
-# RUN IF MAIN
-if __name__ == "__main__":
-    manager = Manager()
-    
-    # Message processing loop
-    while True:
+def connect_wifi():
+    # Try hardcoded credentials first
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(True)
+    if not wlan.isconnected():
+        print("Connecting to WiFi...")
         try:
-            # Check crown status
-            manager.getOperatorManager().checkCrownStatus()
-            
-            # Process any messages
-            mac, msg = manager.getESPNowManager().espnow.recv(0)
-            if msg:
-                manager.getOperatorManager().processMessage(mac, msg)
-            
-            # Only break if we're not crown and have completed connection
-            if (not manager.getOperatorManager().isCrown and 
-                manager.getOperatorManager().connection_complete):
-                break
-                
-        except Exception as e:
-            print("Error processing message:", e)
-        time.sleep(0.1)
+            wlan.connect(WIFI_SSID, WIFI_PASS)
+            for _ in range(10):
+                if wlan.isconnected():
+                    print("Connected to hardcoded network")
+                    return True
+                time.sleep(1)
+        except:
+            print("Failed to connect with hardcoded credentials")
+
+        # Fallback to wifi.txt
+        ssid, password = config.getWifiCreds()
+        if ssid and password:
+            try:
+                wlan.connect(ssid, password)
+                for _ in range(10):
+                    if wlan.isconnected():
+                        print("Connected using wifi.txt")
+                        return True
+                    time.sleep(1)
+            except:
+                print("Failed to connect with wifi.txt")
+    return wlan.isconnected()
+
+
+def report_to_server(scanner):
+    if not scanner.is_scanning():
+        scanner.start_scan()
+        time.sleep(5.1)  # Wait for enhanced scan to complete
+
+        devices = scanner.get_devices()
+        if devices:
+            try:
+                response = urequests.post(
+                    f"http://{SERVER_IP}:3000/api/devices",
+                    headers={"Content-Type": "application/json"},
+                    data=ujson.dumps(
+                        {"listenerMac": scanner.mac_address, "devices": devices}
+                    ),
+                )
+                print(
+                    f"Reported {len(devices)} devices. Status: {response.status_code}"
+                )
+                response.close()
+            except Exception as e:
+                print("Error reporting to server:", e)
+
+
+def report_single_device(scanner, device_mac):
+    """Report or update a single device's information."""
+    if not scanner.is_scanning():
+        scanner.start_scan()
+        time.sleep(2.1)  # Shorter scan time for single device
+        
+        devices = scanner.get_devices()
+        device = next((d for d in devices if d['mac'] == device_mac), None)
+        
+        if device:
+            try:
+                response = urequests.post(
+                    f"http://{SERVER_IP}:3000/api/device",
+                    headers={"Content-Type": "application/json"},
+                    data=ujson.dumps({
+                        "listenerMac": scanner.mac_address,
+                        "device": device
+                    })
+                )
+                print(f"Updated device {device_mac}. Status: {response.status_code}")
+                response.close()
+                return True
+            except Exception as e:
+                print("Error reporting single device:", e)
+                return False
+    return False
+
+
+def main():
+    if not connect_wifi():
+        print("Failed to connect to WiFi")
+        return
+
+    scanner = BLEScanner()
+    print(f"Scanner MAC: {scanner.mac_address}")
+
+    while True:
+        report_to_server(scanner)
+        # Gather extra details after scanning
+        scanner.gatherDeviceDetails()
+        time.sleep(1.5)  # Wait before next scan
+
+
+if __name__ == "__main__":
+    main()
